@@ -46,7 +46,7 @@ try {
         try { Watch-SupportLease $Id } catch { if ($_.Exception.Message -ne 'end iteration') { throw } }
     }
     Assert-True ($script:leaseActivities.Count -eq 2 -and $script:leaseActivities[0] -eq $true -and $script:leaseActivities[1] -eq $false) 'Monitor restart must not replay acknowledged input.'
-    Write-Host 'Windows activity and lease tests passed.' 
+    Write-Host 'Windows activity and lease tests passed.'
 } finally {
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath $testRoot -Recurse -Force
 }
