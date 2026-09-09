@@ -197,16 +197,16 @@ gh run watch --repo transinfosh/<repo> <run-id> --exit-status
 
 1. 运维人员打开 `https://edge.trinfo.net/support/`，使用获准的 GitHub 组织账号登录；
 2. 使用固定、可复用的客户环境标识，例如 `dtaut-srm-prod-01`；同一机器不要每次换名字；
-3. 点击“创建会话”；页面只显示一次客户执行命令和一次性会话码；
-4. 命令与会话码通过两个独立安全渠道交给客户；会话码默认 15 分钟有效；
-5. 客户执行一条 `curl ... | sudo bash` 命令，并在终端隐藏输入一次性会话码；
+3. 点击“创建会话”；页面只显示一次客户执行命令；完整链接就是接入凭据；
+4. 命令通过安全渠道交给客户；领取链接默认 15 分钟有效；
+5. 客户执行一条 `curl ... | sudo bash` 命令，无需另输会话码；
 6. 页面状态变为“已连接”后，记录完整 12 位会话 ID。
 
-页面不持久保存一次性会话码和原始客户命令，这是安全设计，不是数据丢失。需要重发时关闭旧会话并
+页面不持久保存原始客户命令，这是安全设计，不是数据丢失。需要重发时关闭旧会话并
 创建新会话，不尝试从日志恢复 Token。
 
 客户机可能因断网、强制关闭或旧版清理失败而残留 `/etc/tsuite-support-client`。新版 bootstrap 会
-使用新会话的一次性码向 edge 核对残留配置中的完整旧会话 ID：只有 edge 已将旧会话标记为
+使用新会话的专用登记密钥向 edge 核对残留配置中的完整旧会话 ID：只有 edge 已将旧会话标记为
 `closed` 或 `expired` 时才自动清理本机残留并继续；任何活动状态、缺失状态或无效本机配置都拒绝
 覆盖。不要为绕过检查而直接删除临时用户、sudoers 或会话目录，应先查清 edge 与客户机两侧状态。
 
@@ -219,7 +219,9 @@ sudo -n -u tsuite-support-operator \
   /usr/local/bin/tsuite-support-console-action show <SESSION_ID>
 ```
 
-开始部署前必须确认状态为 `enrolled`、`tunnel_reachable` 为 true，且未超过 `expires_at`。
+开始部署前必须确认状态为 `enrolled`、`tunnel_reachable` 为 true，且未超过当前 `expires_at`。
+新会话从接入起按闲置窗口自动续期，仅实际标准输入和发起 `run` 的那一次命令输入计为活动；
+任务运行、输出、页面刷新与隧道保活均不续期。长任务无输入超过闲置窗口仍会到期。`expires_at` 会变化，不能按创建时缓存的期限删 key。新逻辑只作用于升级后重新创建的会话。
 
 ### 控制机到客户的 SSH 前置条件
 
@@ -395,9 +397,10 @@ tsuite-support-operator-gc.timer
   `ssh` 和 `run`；
 - 精确重启 `nginx`、`tsuite-frpc`、`tsuite-support-console`、`tsuite-github-egress`。
 
-其他 sudo 操作必须重新输入 `adam` 的密码。旧的广泛规则已从 `/etc/sudoers.d` 移除，受限备份位于
-`/srv/tsuite-deploy/backups/control-sudoers/99-tsuite-bootstrap.before-hardening`，不得把该备份复制回
-`/etc/sudoers.d` 作为日常解决办法。
+2026-09-08 现场更新：用户已为 `adam` 增加 `(ALL : ALL) NOPASSWD: ALL`，
+已通过 `sudo -n -l` 和 `sudo -n /usr/bin/id -u`（返回 `0`）核实；当前控制机部署无需再次输入 sudo 密码。
+上面的精确会话与重启规则仍保留。旧配置备份
+`/srv/tsuite-deploy/backups/control-sudoers/99-tsuite-bootstrap.before-hardening` 不应作为部署步骤恢复。
 
 edge 服务：
 

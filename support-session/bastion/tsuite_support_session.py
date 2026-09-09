@@ -89,9 +89,9 @@ def validate_created_by(value: str) -> str:
 	return value
 
 
-def validate_purpose(value: str) -> str:
+def validate_purpose(value: str, *, allow_empty: bool = False) -> str:
 	value = value.strip()
-	if not value or len(value) > 200 or any(ord(character) < 32 for character in value):
+	if (not value and not allow_empty) or len(value) > 200 or any(ord(character) < 32 for character in value):
 		raise SupportError("支持用途必须为 1-200 个可见字符")
 	return value
 
@@ -285,13 +285,22 @@ def rewrite_enrollment_authorized_keys(store: SessionStore) -> None:
 	lines = []
 	for session in store.all():
 		public_key = session.get("enrollment_public_key")
-		if session["status"] != "issued" or not public_key:
+		if session["status"] not in {"issued", "enrolled"} or not public_key:
 			continue
 		lines.append(
-			f'command="/usr/local/sbin/tsuite-support-session --config '
+			f'command="sudo -n /usr/local/sbin/tsuite-support-session --config '
 			f'/etc/tsuite-support/config.json enroll-ssh {session["id"]}",'
 			f'restrict,expiry-time="{ssh_expiry(session["token_expires_at"])}" '
 			f'{public_key} enrollment:{session["id"]}\n'
+		)
+	for session in store.all():
+		if session["status"] != "enrolled" or not session.get("lease_public_key"):
+			continue
+		lines.append(
+			f'command="sudo -n /usr/local/sbin/tsuite-support-session --config '
+			f'/etc/tsuite-support/config.json lease-ssh {session["id"]}",'
+			f'restrict,expiry-time="{ssh_expiry(session["expires_at"])}" '
+			f'{session["lease_public_key"]} lease:{session["id"]}\n'
 		)
 	path = store.settings.authorized_keys_dir / "tsuite-enroll"
 	path.parent.mkdir(parents=True, exist_ok=True)
@@ -317,14 +326,21 @@ def create_session(
 	customer: str,
 	operator_public_key: str,
 	created_by: str,
-	purpose: str,
+	purpose: str = "",
+	platform: str = "linux",
 ) -> tuple[dict[str, Any], str]:
 	if not CUSTOMER_RE.fullmatch(customer):
 		raise SupportError("客户标识仅允许小写字母、数字和连字符")
 	created_by = validate_created_by(created_by)
-	purpose = validate_purpose(purpose)
+	purpose = validate_purpose(purpose, allow_empty=True)
+	if platform not in {"linux", "windows"}:
+		raise SupportError("客户操作系统无效")
 	settings = store.settings
 	settings.validate()
+	if platform == "windows":
+		for name in ("bootstrap.ps1", "windows-client.ps1"):
+			if not settings.bootstrap_path.with_name(name).is_file():
+				raise SupportError("请先安装 Windows 客户脚本")
 	with store.locked():
 		session_id = secrets.token_hex(6)
 		while store.path(session_id).exists():
@@ -348,12 +364,15 @@ def create_session(
 			session = {
 				"id": session_id,
 				"customer": customer,
+				"platform": platform,
+				"auth_mode": "enrollment-key",
+				"idle_timeout_seconds": settings.session_ttl_seconds,
 				"created_by": created_by,
 				"purpose": purpose,
 				"status": "issued",
 				"created_at": now,
 				"token_expires_at": now + settings.token_ttl_seconds,
-				"expires_at": now + settings.session_ttl_seconds,
+				"expires_at": now + settings.token_ttl_seconds,
 				"token_hash": token_hash(token),
 				"download_id": download_id,
 				"remote_port": remote_port,
@@ -385,13 +404,17 @@ def public_session(session: dict[str, Any]) -> dict[str, Any]:
 	secret_fields = {
 		"token_hash", "tunnel_private_key", "operator_public_key", "enroll_nonce",
 		"enrollment_private_key", "enrollment_public_key", "download_id",
+		"lease_private_key", "lease_public_key",
 	}
 	return {key: value for key, value in session.items() if key not in secret_fields}
 
 
 def enrollment_payload(session: dict[str, Any], settings: Settings) -> dict[str, Any]:
 	return {
-		"schema_version": 1,
+		"schema_version": 2 if session.get("idle_timeout_seconds") else 1,
+		**({"idle_timeout_seconds": session["idle_timeout_seconds"],
+			"lease_private_key": session["lease_private_key"]} if session.get("idle_timeout_seconds") else {}),
+		"platform": session.get("platform", "linux"),
 		"session_id": session["id"],
 		"customer": session["customer"],
 		"expires_at": session["expires_at"],
@@ -405,11 +428,71 @@ def enrollment_payload(session: dict[str, Any], settings: Settings) -> dict[str,
 	}
 
 
+def enrollment_authenticated(session: dict[str, Any], token: str, key_authenticated: bool) -> bool:
+	if session.get("auth_mode") == "enrollment-key":
+		return key_authenticated
+	return secrets.compare_digest(session.get("token_hash", ""), token_hash(token))
+
+
+def rewrite_tunnel_expiry(store: SessionStore, session: dict[str, Any]) -> None:
+	path = store.settings.authorized_keys_dir / session["tunnel_user"]
+	text = path.read_text(encoding="utf-8")
+	text, count = re.subn(r'expiry-time="[0-9]{14}Z"', f'expiry-time="{ssh_expiry(session["expires_at"])}"', text)
+	if count != 1:
+		raise SupportError("隧道公钥到期配置无效")
+	temporary = path.with_name(f".{path.name}.{os.getpid()}")
+	try:
+		temporary.write_text(text, encoding="utf-8")
+		os.chmod(temporary, 0o600)
+		chown_to_user(temporary, session["tunnel_user"])
+		os.replace(temporary, path)
+	finally:
+		with contextlib.suppress(FileNotFoundError):
+			temporary.unlink()
+
+
+def renew_lease(store: SessionStore, session_id: str, active: bool) -> dict[str, Any]:
+	if type(active) is not bool:
+		raise SupportError("活动标志无效")
+	with store.locked():
+		session = store.load(session_id)
+		now = int(time.time())
+		if session["status"] != "enrolled" or now >= session["expires_at"]:
+			raise SupportError("支持会话已经结束或过期")
+		if not session.get("idle_timeout_seconds"):
+			raise SupportError("旧会话不支持续期")
+		if active:
+			session["last_activity_at"] = now
+			session["expires_at"] = max(session["expires_at"], now + session["idle_timeout_seconds"])
+			rewrite_tunnel_expiry(store, session)
+			store.save(session)
+			rewrite_enrollment_authorized_keys(store)
+		return {"session_id": session_id, "expires_at": session["expires_at"],
+			"idle_timeout_seconds": session["idle_timeout_seconds"]}
+
+
+def lease_ssh(store: SessionStore, session_id: str) -> None:
+	if os.environ.get("SSH_ORIGINAL_COMMAND") != "lease":
+		raise SupportError("续期密钥仅允许 lease")
+	request = sys.stdin.buffer.readline(1025)
+	if not request or len(request) > 1024 or sys.stdin.buffer.read(1):
+		raise SupportError("续期请求大小无效")
+	try:
+		body = json.loads(request)
+		if not isinstance(body, dict) or set(body) != {"active"}:
+			raise SupportError("续期请求格式无效")
+		payload = renew_lease(store, session_id, body["active"])
+	except (ValueError, TypeError) as error:
+		raise SupportError("续期请求格式无效") from error
+	print(json.dumps(payload, separators=(",", ":")))
+
+
 def confirm_session_replacement(
 	store: SessionStore,
 	token: str,
 	new_session_id: str,
 	existing_session_id: str,
+	*, key_authenticated: bool = False,
 ) -> str:
 	"""Confirm that a local session residue belongs to a terminal edge session.
 
@@ -419,7 +502,7 @@ def confirm_session_replacement(
 	now = int(time.time())
 	with store.locked():
 		new_session = store.load(new_session_id)
-		if not secrets.compare_digest(new_session.get("token_hash", ""), token_hash(token)):
+		if not enrollment_authenticated(new_session, token, key_authenticated):
 			raise SupportError("会话码无效")
 		if new_session["status"] != "issued":
 			raise SupportError("会话码已经被使用")
@@ -435,24 +518,30 @@ def confirm_session_replacement(
 	return existing_session_id
 
 
-def enroll(store: SessionStore, token: str, nonce: str, customer_host_key: str, session_id: str | None = None) -> dict[str, Any]:
+def enroll(store: SessionStore, token: str, nonce: str, customer_host_key: str, session_id: str | None = None, *, key_authenticated: bool = False) -> dict[str, Any]:
 	if not NONCE_RE.fullmatch(nonce):
 		raise SupportError("enrollment nonce 无效")
 	customer_host_key = key_without_comment(customer_host_key)
 	now = int(time.time())
 	with store.locked():
 		session = store.load(session_id) if session_id else store.find_by_token(token_hash(token))
-		if session is None or not secrets.compare_digest(session.get("token_hash", ""), token_hash(token)):
+		if session is None or not enrollment_authenticated(session, token, key_authenticated):
 			raise SupportError("会话码无效")
 		if now >= session["token_expires_at"] and session["status"] in {"issued", "enrolled"}:
 			raise SupportError("会话码已过期")
 		if now >= session["expires_at"]:
 			raise SupportError("支持会话已过期")
 		if session["status"] == "issued":
+			if session.get("idle_timeout_seconds"):
+				session["expires_at"] = now + session["idle_timeout_seconds"]
+				session["last_activity_at"] = now
+				session["lease_private_key"], session["lease_public_key"] = create_key_pair(f'lease:{session["id"]}')
+				rewrite_tunnel_expiry(store, session)
 			session["enroll_nonce"] = nonce
 			session["customer_host_key"] = customer_host_key
 			session.pop("enrollment_private_key", None)
-			session.pop("enrollment_public_key", None)
+			if not session.get("idle_timeout_seconds"):
+				session.pop("enrollment_public_key", None)
 			store.transition(session, "enrolled")
 			store.save(session)
 		elif session["status"] == "enrolled" and secrets.compare_digest(session.get("enroll_nonce", ""), nonce):
@@ -460,6 +549,9 @@ def enroll(store: SessionStore, token: str, nonce: str, customer_host_key: str, 
 				raise SupportError("同一 enrollment nonce 的客户 Host Key 不一致")
 		else:
 			raise SupportError("会话码已经被使用")
+		if session.get("idle_timeout_seconds"):
+			rewrite_enrollment_authorized_keys(store)
+			remove_customer_script(store.settings, session)
 	return enrollment_payload(session, store.settings)
 
 
@@ -505,6 +597,8 @@ def terminate_session(
 	session.pop("tunnel_private_key", None)
 	session.pop("operator_public_key", None)
 	session.pop("token_hash", None)
+	session.pop("lease_private_key", None)
+	session.pop("lease_public_key", None)
 	session.pop("enroll_nonce", None)
 	store.transition(session, status)
 	store.save(session)
@@ -522,6 +616,9 @@ def enroll_ssh(store: SessionStore, session_id: str) -> None:
 	if original_command == "bootstrap":
 		sys.stdout.write(store.settings.bootstrap_path.read_text(encoding="utf-8"))
 		return
+	if original_command == "linux-client":
+		sys.stdout.write(store.settings.bootstrap_path.with_name("linux-client.py").read_text(encoding="utf-8"))
+		return
 	if original_command not in {"reconcile", "enroll"}:
 		raise SupportError("仅允许 bootstrap、reconcile 或 enroll")
 	request = sys.stdin.buffer.readline(8193)
@@ -531,12 +628,12 @@ def enroll_ssh(store: SessionStore, session_id: str) -> None:
 		body = json.loads(request)
 		if original_command == "reconcile":
 			existing_session_id = confirm_session_replacement(
-				store, body["token"], session_id, body["existing_session_id"]
+				store, body.get("token", ""), session_id, body["existing_session_id"], key_authenticated=True
 			)
 			payload = {"replace_existing_session": existing_session_id}
 		else:
 			payload = enroll(
-				store, body["token"], body["nonce"], body["customer_host_key"], session_id
+				store, body.get("token", ""), body["nonce"], body["customer_host_key"], session_id, key_authenticated=True
 			)
 	except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
 		raise SupportError("enrollment 请求格式无效") from error
@@ -544,6 +641,19 @@ def enroll_ssh(store: SessionStore, session_id: str) -> None:
 
 
 def customer_script(settings: Settings, session: dict[str, Any]) -> str:
+	if session.get("platform", "linux") == "windows":
+		configuration = {
+			"session_id": session["id"],
+			"bastion_host": settings.bastion_host,
+			"bastion_port": settings.bastion_port,
+			"bastion_host_key": settings.bastion_host_key,
+			"enrollment_private_key": session["enrollment_private_key"],
+		}
+		bootstrap = settings.bootstrap_path.with_name("bootstrap.ps1").read_text(encoding="utf-8")
+		client = settings.bootstrap_path.with_name("windows-client.ps1").read_bytes()
+		return bootstrap.replace(
+			"__TSUITE_CONFIG_BASE64__", base64.b64encode(json.dumps(configuration).encode()).decode()
+		).replace("__TSUITE_CLIENT_BASE64__", base64.b64encode(client).decode())
 	enrollment_key = base64.b64encode(session["enrollment_private_key"].encode()).decode()
 	known_host = settings.bastion_host
 	if settings.bastion_port != 22:
@@ -562,7 +672,7 @@ def customer_script(settings: Settings, session: dict[str, Any]) -> str:
 		"sudo bash -s -- --enrollment-key \"$temporary/enrollment_key\" "
 		"--known-hosts \"$temporary/known_hosts\" "
 		f"--bastion-host {shlex.quote(settings.bastion_host)} --bastion-port {settings.bastion_port} "
-		"--accept-temporary-root-access",
+		"--accept-temporary-root-access --key-auth",
 	))
 	return f"bash -c {shlex.quote(inner)}"
 
@@ -572,6 +682,12 @@ def customer_command(settings: Settings, session: dict[str, Any]) -> str:
 	if not re.fullmatch(r"[A-Za-z0-9_-]{43}", download_id):
 		raise SupportError("下载标识无效")
 	url = f"{settings.download_base_url}/{download_id}"
+	if session.get("platform", "linux") == "windows":
+		return (
+			"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
+			f'"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; '
+			f"& ([scriptblock]::Create((New-Object Net.WebClient).DownloadString('{url}')))\""
+		)
 	return f"curl -fsS --proto '=https' --tlsv1.2 {shlex.quote(url)} | sudo bash"
 
 
@@ -607,7 +723,8 @@ def build_parser() -> argparse.ArgumentParser:
 	create.add_argument("--customer", required=True)
 	create.add_argument("--operator-public-key", required=True)
 	create.add_argument("--created-by", required=True)
-	create.add_argument("--purpose", required=True)
+	create.add_argument("--purpose", default="")
+	create.add_argument("--platform", choices=("linux", "windows"), default="linux")
 	create.add_argument("--json", action="store_true")
 	show = subparsers.add_parser("show")
 	show.add_argument("session_id")
@@ -621,6 +738,8 @@ def build_parser() -> argparse.ArgumentParser:
 	subparsers.add_parser("gc")
 	enroll_parser = subparsers.add_parser("enroll-ssh")
 	enroll_parser.add_argument("session_id")
+	lease_parser = subparsers.add_parser("lease-ssh")
+	lease_parser.add_argument("session_id")
 	return parser
 
 
@@ -637,12 +756,12 @@ def main() -> int:
 				read_public_key(args.operator_public_key),
 				args.created_by,
 				args.purpose,
+				args.platform,
 			)
 			result = public_session(session) | {"token": token}
 			result["customer_command"] = customer_command(settings, session)
 			print(json.dumps(result, ensure_ascii=False) if args.json else result["customer_command"])
-			if not args.json:
-				print(f"一次性会话码（{settings.token_ttl_seconds // 60} 分钟有效）: {token}", file=sys.stderr)
+
 		elif args.command == "show":
 			result = public_session(store.load(args.session_id))
 			result["tunnel_reachable"] = port_listening("127.0.0.1", int(result["remote_port"]))
@@ -687,6 +806,8 @@ def main() -> int:
 							gc_errors.append(str(error))
 			if gc_errors:
 				raise SupportError("；".join(gc_errors))
+		elif args.command == "lease-ssh":
+			lease_ssh(store, args.session_id)
 		elif args.command == "enroll-ssh":
 			enroll_ssh(store, args.session_id)
 		return 0

@@ -6,6 +6,7 @@ BASTION_PORT=""
 ENROLLMENT_KEY=""
 KNOWN_HOSTS=""
 ACCEPT_ROOT_ACCESS=false
+KEY_AUTH=false
 TOKEN="${TSUITE_SUPPORT_TOKEN:-}"
 work_dir=""
 ops_user=""
@@ -23,13 +24,14 @@ rollback_installation() {
 	local exit_status="$?"
 	if ((exit_status != 0)) && "$installation_started" && ! "$installation_complete"; then
 		systemctl disable --now tsuite-support-client.service \
-			tsuite-support-client-expiry.timer 2>/dev/null || true
+			tsuite-support-client-expiry.timer tsuite-support-client-monitor.service 2>/dev/null || true
 		[[ -z "$ops_user" ]] || userdel -r "$ops_user" 2>/dev/null || true
 		[[ -z "$session_id" ]] || rm -f "/etc/sudoers.d/tsuite-support-$session_id"
 		rm -rf /etc/tsuite-support-client
 		rm -f /etc/systemd/system/tsuite-support-client.service \
 			/etc/systemd/system/tsuite-support-client-cleanup.service \
 			/etc/systemd/system/tsuite-support-client-expiry.timer \
+      /etc/systemd/system/tsuite-support-client-monitor.service \
 			/usr/local/sbin/tsuite-support-client
 		systemctl daemon-reload 2>/dev/null || true
 	fi
@@ -47,6 +49,7 @@ while (($#)); do
 		--enrollment-key) ENROLLMENT_KEY="${2:-}"; shift ;;
 		--known-hosts) KNOWN_HOSTS="${2:-}"; shift ;;
 		--accept-temporary-root-access) ACCEPT_ROOT_ACCESS=true ;;
+		--key-auth) KEY_AUTH=true ;;
 		--help | -h)
 			printf '用法: bootstrap.sh --bastion-host HOST --bastion-port PORT --enrollment-key FILE --known-hosts FILE --accept-temporary-root-access\n'
 			exit 0
@@ -58,7 +61,9 @@ done
 
 [[ "$EUID" -eq 0 ]] || die "请使用 sudo 运行"
 [[ "$BASTION_HOST" =~ ^[a-zA-Z0-9.-]+$ ]] || die "堡垒机地址无效"
-[[ "$BASTION_PORT" =~ ^[0-9]+$ ]] && ((BASTION_PORT >= 1 && BASTION_PORT <= 65535)) || die "堡垒机 SSH 端口无效"
+if [[ ! "$BASTION_PORT" =~ ^[0-9]+$ ]] || ((BASTION_PORT < 1 || BASTION_PORT > 65535)); then
+	die "堡垒机 SSH 端口无效"
+fi
 [[ -f "$ENROLLMENT_KEY" && ! -L "$ENROLLMENT_KEY" ]] || die "本次会话的 enrollment key 无效"
 [[ -f "$KNOWN_HOSTS" && ! -L "$KNOWN_HOSTS" ]] || die "堡垒机 known_hosts 无效"
 "$ACCEPT_ROOT_ACCESS" || die "必须显式确认临时 root 运维访问"
@@ -99,11 +104,11 @@ PY
 )" || die "无法读取本机支持会话标识"
 fi
 
-if [[ -z "$TOKEN" ]]; then
+if ! "$KEY_AUTH" && [[ -z "$TOKEN" ]]; then
 	read -r -s -p "请输入一次性支持会话码: " TOKEN </dev/tty
 	printf '\n' >/dev/tty
 fi
-[[ "$TOKEN" =~ ^[A-Za-z0-9_-]{40,128}$ ]] || die "会话码格式无效"
+"$KEY_AUTH" || [[ "$TOKEN" =~ ^[A-Za-z0-9_-]{40,128}$ ]] || die "会话码格式无效"
 
 work_dir="$(mktemp -d /tmp/tsuite-support-bootstrap.XXXXXX)"
 chmod 0700 "$work_dir"
@@ -152,6 +157,7 @@ PY
 fi
 rm -f "$work_dir/token"
 unset TOKEN
+"${enrollment_ssh[@]}" linux-client </dev/null >"$work_dir/linux-client.py"
 "${enrollment_ssh[@]}" enroll \
 	<"$work_dir/request.json" >"$work_dir/response.json"
 chmod 0600 "$work_dir/response.json"
@@ -172,7 +178,7 @@ required = {
     "bastion_port", "bastion_host_key", "remote_port", "tunnel_user",
     "tunnel_private_key", "operator_public_key",
 }
-if value.keys() < required or value["schema_version"] != 1:
+if not required <= value.keys() or value["schema_version"] not in (1, 2):
     raise SystemExit("enrollment 响应格式无效")
 if not re.fullmatch(r"[a-f0-9]{12}", value["session_id"]):
     raise SystemExit("session_id 无效")
@@ -199,6 +205,12 @@ if (
     or not private_key.endswith("-----END OPENSSH PRIVATE KEY-----\n")
 ):
     raise SystemExit("tunnel_private_key 无效")
+if value["schema_version"] == 2:
+    if type(value.get("idle_timeout_seconds")) is not int or not 300 <= value["idle_timeout_seconds"] <= 28800:
+        raise SystemExit("idle_timeout_seconds 无效")
+    lease_key = value.get("lease_private_key", "")
+    if not isinstance(lease_key, str) or not lease_key.startswith("-----BEGIN OPENSSH PRIVATE KEY-----\n") or len(lease_key) > 4096:
+        raise SystemExit("lease_private_key 无效")
 output = pathlib.Path(output_dir)
 (output / "payload.json").write_text(json.dumps(value), encoding="utf-8")
 os.chmod(output / "payload.json", 0o600)
@@ -226,6 +238,7 @@ ops_user="tsuite-ops-${session_id:0:8}"
 id "$ops_user" >/dev/null 2>&1 && die "临时运维用户已存在，拒绝覆盖: $ops_user"
 [[ ! -e "/etc/sudoers.d/tsuite-support-$session_id" ]] || die "临时 sudoers 已存在，拒绝覆盖"
 installation_started=true
+renewable="$(python3 -c 'import json,sys; print("true" if json.load(open(sys.argv[1]))["schema_version"] == 2 else "false")' "$work_dir/payload.json")"
 useradd --create-home --shell /bin/bash --password 'NP' "$ops_user"
 ops_home="$(getent passwd "$ops_user" | cut -d: -f6)"
 ops_group="$(id -gn "$ops_user")"
@@ -242,6 +255,22 @@ visudo -cf "/etc/sudoers.d/tsuite-support-$session_id" >/dev/null || die "临时
 
 install -d -m 0700 /etc/tsuite-support-client
 install -m 0600 "$work_dir/tunnel_ed25519" /etc/tsuite-support-client/tunnel_ed25519
+if "$renewable"; then
+    install -m 0700 "$work_dir/linux-client.py" /etc/tsuite-support-client/monitor.py
+    python3 - "$work_dir/payload.json" "$ops_user" <<'PY_STATE'
+import json
+import pathlib
+import sys
+root = pathlib.Path('/etc/tsuite-support-client')
+value = json.load(open(sys.argv[1]))
+(root / 'lease_ed25519').write_text(value.pop('lease_private_key'))
+(root / 'lease_ed25519').chmod(0o600)
+value.pop('tunnel_private_key')
+value['ops_user'] = sys.argv[2]
+(root / 'session.json').write_text(json.dumps(value))
+(root / 'session.json').chmod(0o600)
+PY_STATE
+fi
 printf '%s %s\n' "$known_host_prefix" "$bastion_host_key" >/etc/tsuite-support-client/known_hosts
 chmod 0600 /etc/tsuite-support-client/known_hosts
 cat >/etc/tsuite-support-client/session.conf <<EOF
@@ -263,9 +292,21 @@ CONFIG=/etc/tsuite-support-client/session.conf
 [[ -f "$CONFIG" && ! -L "$CONFIG" ]] || { printf '支持会话配置不存在\n' >&2; exit 1; }
 # shellcheck disable=SC1090
 . "$CONFIG"
-case "${1:-status}" in
+action="${1:-status}"
+if [[ "$action" == cleanup* || "$action" == close || "$action" == activity ]]; then
+    exec 9>/etc/tsuite-support-client/.lock
+    flock -x 9
+    . "$CONFIG"
+fi
+case "$action" in
+  activity)
+    [[ ! -e /etc/tsuite-support-client/closing ]] && (( $(date +%s) < EXPIRES_AT )) || exit 1
+    touch /etc/tsuite-support-client/activity
+    ;;
+
   open) systemctl enable --now tsuite-support-client.service ;;
   close)
+    touch /etc/tsuite-support-client/closing
     systemctl start --no-block tsuite-support-client-cleanup.service
     printf 'cleanup-scheduled:%s\n' "$SESSION_ID"
     ;;
@@ -283,8 +324,11 @@ case "${1:-status}" in
       -p "$BASTION_PORT" -R "127.0.0.1:$REMOTE_PORT:127.0.0.1:22" \
       "$TUNNEL_USER@$BASTION_HOST"
     ;;
-  cleanup)
-    systemctl disable tsuite-support-client.service tsuite-support-client-expiry.timer 2>/dev/null || true
+  cleanup|cleanup-if-expired)
+    if [[ "$action" == cleanup-if-expired && ! -e /etc/tsuite-support-client/closing ]] && (( $(date +%s) < EXPIRES_AT )); then exit 0; fi
+    touch /etc/tsuite-support-client/closing
+    systemctl disable --now tsuite-support-client-monitor.service 2>/dev/null || true
+    systemctl disable tsuite-support-client.service tsuite-support-client-expiry.timer tsuite-support-client-monitor.service 2>/dev/null || true
     systemctl stop tsuite-support-client.service 2>/dev/null || true
     pkill -KILL -u "$OPS_USER" 2>/dev/null || true
     userdel -r "$OPS_USER" 2>/dev/null || true
@@ -293,6 +337,7 @@ case "${1:-status}" in
     rm -f /etc/systemd/system/tsuite-support-client.service \
       /etc/systemd/system/tsuite-support-client-cleanup.service \
       /etc/systemd/system/tsuite-support-client-expiry.timer \
+      /etc/systemd/system/tsuite-support-client-monitor.service \
       /usr/local/sbin/tsuite-support-client
     systemctl daemon-reload
     ;;
@@ -303,6 +348,8 @@ chmod 0755 /usr/local/sbin/tsuite-support-client
 
 runtime_seconds="$((expires_at - $(date +%s)))"
 ((runtime_seconds > 0)) || die "支持会话在安装完成前已过期"
+runtime_limit="RuntimeMaxSec=$runtime_seconds"
+"$renewable" && runtime_limit=""
 cat >/etc/systemd/system/tsuite-support-client.service <<EOF
 [Unit]
 Description=TSuite temporary reverse SSH support session
@@ -314,7 +361,7 @@ Type=simple
 ExecStart=/usr/local/sbin/tsuite-support-client run-tunnel
 Restart=on-failure
 RestartSec=5
-RuntimeMaxSec=$runtime_seconds
+$runtime_limit
 NoNewPrivileges=true
 PrivateTmp=true
 
@@ -328,14 +375,15 @@ Description=Cleanup TSuite support session
 [Service]
 Type=oneshot
 ExecStartPre=/bin/sleep 2
-ExecStart=/usr/local/sbin/tsuite-support-client cleanup
+ExecStart=/usr/local/sbin/tsuite-support-client cleanup-if-expired
 EOF
 cat >/etc/systemd/system/tsuite-support-client-expiry.timer <<EOF
 [Unit]
 Description=Expire TSuite support session
 
 [Timer]
-OnCalendar=@$expires_at
+OnBootSec=15s
+OnUnitActiveSec=15s
 Persistent=true
 AccuracySec=5s
 Unit=tsuite-support-client-cleanup.service
@@ -343,7 +391,21 @@ Unit=tsuite-support-client-cleanup.service
 [Install]
 WantedBy=timers.target
 EOF
+if "$renewable"; then
+cat >/etc/systemd/system/tsuite-support-client-monitor.service <<'EOF'
+[Unit]
+Description=Renew active TSuite support lease
+After=network-online.target
+[Service]
+ExecStart=/usr/bin/python3 /etc/tsuite-support-client/monitor.py
+Restart=on-failure
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+EOF
+fi
 systemctl daemon-reload
+if "$renewable"; then systemctl enable --now tsuite-support-client-monitor.service; fi
 systemctl enable --now tsuite-support-client.service tsuite-support-client-expiry.timer
 installation_complete=true
 printf '支持会话已建立，会话 ID: %s，有效期至 epoch %s。\n' "$session_id" "$expires_at"

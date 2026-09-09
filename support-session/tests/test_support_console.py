@@ -143,14 +143,42 @@ class SupportConsoleTest(unittest.TestCase):
 		value = json.loads(content)
 		content = value["summary"] + value["groups"]
 		self.assertEqual(content.count('class="customer-name">customer-one'), 1)
-		self.assertIn("2 次会话 · 1 个活动", content)
-		self.assertIn(">012345abcdef</a>", content)
+		self.assertIn("1 次会话 · 1 个活动", content)
+		self.assertNotIn(">012345abcdef</a>", content)
 		self.assertIn(">fedcba543210</a>", content)
 		self.assertIn("已连接", content)
-		self.assertIn("已关闭", content)
+		self.assertNotIn("已关闭", content)
+		self.assertNotIn("已过期", content)
+		self.assertNotIn("customer-two", content)
+		self.assertNotIn("历史会话", content)
+		self.assertIn("<strong>1</strong> 个客户环境", content)
 		self.assertIn('action="/support/session/fedcba543210/close"', content)
 		self.assertNotIn('action="/support/session/012345abcdef/close"', content)
 		self.assertIn(".inline-actions form{margin:0 0 0 auto}", CONSOLE.page("test", "").decode())
+
+	def test_dashboard_empty_after_all_sessions_end(self):
+		app = CONSOLE.Application(self.settings)
+		session_id, _ = app.store.new_session("alice", "Alice")
+		with mock.patch.object(CONSOLE, "manager", return_value="012345abcdef\told-customer\tclosed\t22000\n"):
+			_, content = self.call(app, "/sessions", cookie=f"tsuite_support_session={session_id}")
+		value = json.loads(content)
+		self.assertIn("当前没有活动支持会话", value["groups"])
+		self.assertNotIn("old-customer", value["groups"])
+		self.assertIn("<strong>0</strong> 个客户环境", value["summary"])
+
+	def test_create_accepts_omitted_purpose(self):
+		app = CONSOLE.Application(self.settings)
+		session_id, csrf = app.store.new_session("alice", "Alice")
+		_, dashboard = self.call(app, "/", cookie=f"tsuite_support_session={session_id}")
+		self.assertIn("支持用途（可选）", dashboard)
+		self.assertNotIn('name="purpose" required', dashboard)
+		with mock.patch.object(CONSOLE, "manager", return_value=json.dumps({
+			"id": "012345abcdef", "token": "", "auth_mode": "enrollment-key", "customer_command": "command",
+		})) as manager:
+			captured, _ = self.call(app, "/session", "POST", f"csrf={csrf}&customer=customer-one", f"tsuite_support_session={session_id}")
+		self.assertTrue(captured["status"].startswith("200"))
+		manager.assert_called_once_with("create", "customer-one", "--created-by", "alice", "--purpose", "")
+
 
 	def test_detail_localizes_fields_values_and_destructive_action(self):
 		app = CONSOLE.Application(self.settings)
@@ -197,6 +225,20 @@ class SupportConsoleTest(unittest.TestCase):
 		self.assertTrue(captured["status"].startswith("303"))
 		self.assertIn(("Location", "/support/"), captured["headers"])
 		manager.assert_called_once_with("close", "012345abcdef", "--closed-by", "alice")
+
+	def test_key_enrollment_page_has_only_customer_command(self):
+		app = CONSOLE.Application(self.settings)
+		session_id, csrf = app.store.new_session("alice", "Alice")
+		with mock.patch.object(CONSOLE, "manager", return_value=json.dumps({
+			"id": "012345abcdef", "token": "unused-compatibility-field", "auth_mode": "enrollment-key",
+			"customer_command": "curl https://example.invalid | sudo bash",
+		})):
+			captured, content = self.call(app, "/session", "POST", f"csrf={csrf}&customer=customer-one&purpose=upgrade", f"tsuite_support_session={session_id}")
+		self.assertTrue(captured["status"].startswith("200"))
+		self.assertNotIn('id="support-token"', content)
+		self.assertNotIn("unused-compatibility-field", content)
+		self.assertIn("无需另输会话码", content)
+
 
 	def test_create_requires_csrf_and_never_persists_one_time_token(self):
 		app = CONSOLE.Application(self.settings)
@@ -270,6 +312,19 @@ class SupportConsoleTest(unittest.TestCase):
 		self.assertIn("--created-by", arguments)
 		self.assertIn("--purpose", arguments)
 		self.assertEqual(manager.call_args.kwargs["input_text"], "ssh-ed25519 " + "A" * 44)
+
+	def test_optional_purpose_passes_bridge_and_cli_but_reason_remains_required(self):
+		with mock.patch.object(BASTION_ACTION, "read_request", return_value={
+			"customer": "customer-one", "operator_public_key": "ssh-ed25519 " + "A" * 44, "created_by": "alice",
+		}):
+			self.assertEqual(BASTION_ACTION.read_create_request()["purpose"], "")
+		self.assertEqual(REMOTE.parser().parse_args(["create", "customer-one", "--created-by", "alice"]).purpose, "")
+		self.assertEqual(CLI.parser().parse_args(["create", "customer-one"]).purpose, "")
+		with self.assertRaises(Exception):
+			REMOTE.validate_purpose("")
+		with self.assertRaises(Exception):
+			REMOTE.validate_purpose("a" * 201, allow_empty=True)
+
 
 	def test_bastion_bridge_records_close_audit(self):
 		request = json.dumps({
@@ -569,6 +624,18 @@ class SupportOperatorBrokerTest(unittest.TestCase):
 			REMOTE.garbage_collect(self.settings)
 		self.assertFalse(REMOTE.identity_path(self.settings, "012345abcdef").exists())
 		self.assertTrue(REMOTE.identity_path(self.settings, "fedcba543210").exists())
+
+	def test_gc_keeps_renewable_identity_when_edge_is_unreachable(self):
+		session_id = "012345abcdef"
+		REMOTE.atomic_write(REMOTE.identity_path(self.settings, session_id), "private")
+		REMOTE.atomic_write(REMOTE.session_state_path(self.settings, session_id), json.dumps({
+			"id": session_id, "identity_file": str(REMOTE.identity_path(self.settings, session_id)),
+			"expires_at": int(time.time()) - 100, "idle_timeout_seconds": 7200,
+		}))
+		with mock.patch.object(REMOTE, "remote_session", side_effect=REMOTE.RemoteActionError("offline")):
+			REMOTE.garbage_collect(self.settings)
+		self.assertTrue(REMOTE.identity_path(self.settings, session_id).exists())
+
 
 	def test_gc_removes_only_stale_orphan_keys(self):
 		stale_id = "012345abcdef"

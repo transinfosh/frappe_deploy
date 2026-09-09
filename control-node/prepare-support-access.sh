@@ -86,6 +86,7 @@ install -d -m 0700 -o "$BROKER_USER" -g "$BROKER_GROUP" "$STATE_DIR" "$STATE_DIR
 install -m 0755 -o root -g root \
 	"$REPO_ROOT/support-session/console/tsuite_support_remote_action.py" \
 	/usr/local/bin/tsuite-support-console-action
+install -m 0644 -o root -g root "$REPO_ROOT/support-session/operator/tsuite_support_activity.py" /usr/local/bin/tsuite_support_activity.py
 
 migrate_or_generate_key() {
 	local name legacy target

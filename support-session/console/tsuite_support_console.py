@@ -50,8 +50,10 @@ DETAIL_FIELD_LABELS = {
 	"close_reason": "关闭原因",
 	"status": "状态",
 	"created_at": "创建时间",
-	"token_expires_at": "会话码到期时间",
-	"expires_at": "会话到期时间",
+	"token_expires_at": "接入链接到期时间",
+	"expires_at": "当前会话到期时间",
+	"idle_timeout_seconds": "闲置超时（秒）",
+	"last_activity_at": "最近活动时间",
 	"enrolled_at": "客户接入时间",
 	"revoking_at": "开始关闭时间",
 	"closed_at": "关闭时间",
@@ -60,6 +62,7 @@ DETAIL_FIELD_LABELS = {
 	"tunnel_user": "隧道用户",
 	"tunnel_reachable": "隧道可达",
 	"customer_host_key": "客户 SSH Host Key",
+	"platform": "操作系统",
 }
 DETAIL_FIELD_ORDER = tuple(DETAIL_FIELD_LABELS)
 TIMESTAMP_FIELDS = {key for key in DETAIL_FIELD_LABELS if key.endswith("_at")}
@@ -314,6 +317,35 @@ def status_badge(status: str) -> str:
 	return f'<span class="badge badge-{style}">{html.escape(label)}</span>'
 
 
+def login_content() -> str:
+	return """<style>
+.login-shell{min-height:calc(100svh - 100px);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px 0;gap:26px}
+.login-card{width:min(440px,100%);padding:40px;background:#fff;border:1px solid #dbe2ea;border-radius:20px;box-shadow:0 16px 48px -24px rgb(15 23 42 / 24%);text-align:center}
+.login-brand{display:inline-flex;align-items:center;gap:10px;margin-bottom:32px;color:#334155;font-size:17px;font-weight:700;letter-spacing:-.02em}
+.login-mark{display:grid;place-items:center;width:36px;height:36px;border-radius:10px;color:#fff;background:#0369a1;font-size:14px;letter-spacing:-.06em}
+.login-card h1{font-size:28px;line-height:1.3;letter-spacing:-.035em}
+.login-description{margin:14px 0 30px;color:#64748b;line-height:1.8;font-size:14px}
+a.login-button{display:flex;align-items:center;justify-content:center;gap:11px;min-height:50px;width:100%;padding:12px 18px;border:1px solid #17212b;border-radius:10px;background:#17212b;color:#fff;font-size:15px;font-weight:600;text-decoration:none;transition:background .15s}
+a.login-button:hover{background:#334155;text-decoration:none}
+a.login-button:focus-visible{outline:3px solid #38bdf8;outline-offset:4px}
+.login-button svg{width:21px;height:21px;flex:none;fill:currentColor}
+.login-note{margin:22px 0 0;padding-top:22px;border-top:1px solid #edf1f5;color:#64748b;font-size:12px;line-height:1.8}
+.login-footer{margin:0;color:#64748b;font-size:12px;letter-spacing:.03em}
+@media(max-width:480px){.login-shell{min-height:calc(100svh - 48px);padding:20px 0;width:100%}.login-card{padding:32px 24px}.login-card h1{font-size:25px}}
+@media(prefers-reduced-motion:reduce){a.login-button{transition:none}}
+</style>
+<main class="login-shell" aria-labelledby="login-title">
+<section class="login-card">
+<div class="login-brand"><span class="login-mark" aria-hidden="true">TS</span><span>TSuite</span></div>
+<h1 id="login-title">远程支持会话</h1>
+<p class="login-description">通过 SSH 跨局域网连接客户环境，<br>建立临时远程支持会话，开展协作与维护。</p>
+<a class="login-button" href="/support/login"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.438 9.8 8.205 11.385.6.11.82-.26.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.043-1.61-4.043-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.09-.745.083-.73.083-.73 1.205.085 1.84 1.237 1.84 1.237 1.07 1.835 2.807 1.305 3.492.998.108-.776.418-1.305.76-1.605-2.665-.305-5.467-1.333-5.467-5.93 0-1.31.467-2.382 1.235-3.222-.124-.303-.535-1.523.117-3.176 0 0 1.008-.322 3.3 1.23A11.5 11.5 0 0 1 12 6.3c1.02.005 2.047.138 3.006.404 2.29-1.552 3.296-1.23 3.296-1.23.654 1.653.243 2.873.12 3.176.77.84 1.233 1.912 1.233 3.222 0 4.61-2.807 5.622-5.48 5.92.43.37.814 1.102.814 2.222 0 1.606-.015 2.896-.015 3.29 0 .32.216.694.825.576C20.565 22.296 24 17.797 24 12.5 24 5.87 18.627.5 12 .5Z"/></svg><span>使用 GitHub 登录</span></a>
+<p class="login-note">请使用已获授权的 GitHub 账号登录</p>
+</section>
+<p class="login-footer">TSuite · 远程支持工作台</p>
+</main>"""
+
+
 def page(title: str, content: str) -> bytes:
 	return f"""<!doctype html>
 <html lang=\"zh-CN\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
@@ -322,7 +354,7 @@ def page(title: str, content: str) -> bytes:
 *{{box-sizing:border-box}} body{{max-width:1080px;margin:0 auto;padding:36px 24px 64px;color:#17212b;font:15px system-ui,-apple-system,\"Segoe UI\",sans-serif;background:#f5f7fa}}
 header{{display:flex;justify-content:space-between;align-items:center;padding:0 0 24px}} h1{{margin:0;font-size:26px;letter-spacing:-.02em}} h2,h3{{margin-top:0}} h2{{font-size:19px}} h3{{font-size:17px}}
 a{{color:#075985;text-decoration:none}} a:hover{{text-decoration:underline}} button,a.button{{display:inline-flex;align-items:center;justify-content:center;border:1px solid #cbd5e1;border-radius:7px;padding:9px 14px;color:#075985;background:#fff;cursor:pointer}} a.button:hover{{text-decoration:none}} button.primary{{border-color:#0369a1;color:#fff;background:#0369a1}} button.danger{{border-color:#dc2626;color:#fff;background:#dc2626}} button.compact{{padding:6px 10px;font-size:13px}} button:hover,a.button:hover{{filter:brightness(.97)}}
-input{{min-width:280px;border:1px solid #cbd5e1;border-radius:7px;padding:10px 12px;background:#fff}} input:focus{{outline:3px solid #bae6fd;border-color:#0284c7}}
+input,select{{min-width:180px;border:1px solid #cbd5e1;border-radius:7px;padding:10px 12px;background:#fff}} input:focus,select:focus{{outline:3px solid #bae6fd;border-color:#0284c7}}
 .card{{background:#fff;border:1px solid #dbe2ea;border-radius:12px;padding:22px;margin:0 0 20px;box-shadow:0 1px 2px rgb(15 23 42 / 4%)}} .muted{{color:#64748b}} .error{{color:#b91c1c}} code{{border-radius:4px;padding:2px 5px;background:#eaf1f7}}
 .secret-section{{margin-top:22px}} .secret-heading{{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:9px}} .secret-heading h2{{margin:0}} .secret{{border:1px solid #cbd5e1;border-radius:8px;padding:14px;color:#0f172a;background:#f8fafc;font:14px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere}} .copy-button{{min-width:76px;padding:7px 11px;color:#0369a1;background:#fff}} .copy-button.copied{{border-color:#86efac;color:#166534;background:#f0fdf4}}
 .create-form{{display:flex;align-items:end;gap:10px;flex-wrap:wrap}} .create-form label{{display:grid;gap:7px;font-weight:600}} .summary{{display:flex;gap:20px;margin-top:18px;color:#475569}} .summary strong{{color:#0f172a;font-size:18px}}
@@ -434,6 +466,8 @@ class Application:
 			parts = line.split("\t")
 			if len(parts) == 4:
 				session_id, customer, status, port = parts
+				if status in {"closed", "expired"}:
+					continue
 				grouped[customer].append((session_id, status, port))
 		group_cards = []
 		active_total = sum(
@@ -480,10 +514,9 @@ class Application:
 				'<th>会话 ID</th><th>状态</th><th>回环端口</th><th>操作</th>'
 				f'</tr></thead><tbody>{"".join(rows)}</tbody></table></div></details>'
 			)
-		groups = "".join(group_cards) or '<div class="card empty">还没有支持会话</div>'
+		groups = "".join(group_cards) or '<div class="card empty">当前没有活动支持会话</div>'
 		summary = (
 			f'<span><strong>{len(grouped)}</strong> 个客户环境</span>'
-			f'<span><strong>{sum(map(len, grouped.values()))}</strong> 次历史会话</span>'
 			f'<span><strong>{active_total}</strong> 个活动会话</span>'
 		)
 		return summary, groups
@@ -491,7 +524,7 @@ class Application:
 	def dashboard(self, start_response: Callable[..., Any], session: sqlite3.Row) -> list[bytes]:
 		content = f"""<header><h1>TSuite 支持管理</h1><form method=\"post\" action=\"/support/logout\"><input type=\"hidden\" name=\"csrf\" value=\"{html.escape(str(session['csrf']))}\"><button>退出 {html.escape(str(session['login']))}</button></form></header>
 <section class=\"card\"><h2>新建支持会话</h2><p class=\"muted\">为同一台客户机器使用固定的环境标识，例如 <code>dtaut-srm-prod-01</code>。每次连接都会自动生成新的完整会话 ID。</p>
-<form class=\"create-form\" method=\"post\" action=\"/support/session\"><input type=\"hidden\" name=\"csrf\" value=\"{html.escape(str(session['csrf']))}\"><label>客户环境标识<input name=\"customer\" required autocomplete=\"off\" placeholder=\"例如 dtaut-srm-prod-01\" pattern=\"[a-z0-9][a-z0-9-]{{0,47}}\"></label><label>支持用途<input name=\"purpose\" required maxlength=\"200\" autocomplete=\"off\" placeholder=\"例如升级 SRM 至 0.1.10\"></label><button class=\"primary\">创建会话</button></form>
+<form class=\"create-form\" method=\"post\" action=\"/support/session\"><input type=\"hidden\" name=\"csrf\" value=\"{html.escape(str(session['csrf']))}\"><label>客户环境标识<input name=\"customer\" required autocomplete=\"off\" placeholder=\"例如 dtaut-srm-prod-01\" pattern=\"[a-z0-9][a-z0-9-]{{0,47}}\"></label><label>支持用途（可选）<input name=\"purpose\" maxlength=\"200\" autocomplete=\"off\" placeholder=\"例如升级 SRM 至 0.1.10\"></label><label>操作系统<select name=\"platform\"><option value=\"linux\">Linux</option><option value=\"windows\">Windows Server</option></select></label><button class=\"primary\">创建会话</button></form>
 <div id=\"session-summary\" class=\"summary\" aria-live=\"polite\"><span class=\"loading-label\">正在读取会话数据…</span></div></section>
 <section><h2>客户环境与会话</h2><div id=\"session-groups\" class=\"group-list\" aria-live=\"polite\" aria-busy=\"true\"><div class=\"card loading\"><span class=\"spinner\"></span><span>正在加载会话列表…</span></div></div></section>"""
 		return self.response(start_response, HTTPStatus.OK, page("支持管理", content))
@@ -528,7 +561,7 @@ class Application:
 				self.store.delete_session(session_id)
 				return self.redirect(start_response, "/support/", [("Set-Cookie", "tsuite_support_session=; Path=/support; Secure; HttpOnly; SameSite=Lax; Max-Age=0")])
 			if session is None:
-				return self.response(start_response, HTTPStatus.UNAUTHORIZED, page("需要登录", "<h1>TSuite 支持管理</h1><p><a href=\"/support/login\">使用 GitHub 登录</a></p>"))
+				return self.response(start_response, HTTPStatus.UNAUTHORIZED, page("登录", login_content()))
 			if path == "/" and method == "GET":
 				return self.dashboard(start_response, session)
 			if path == "/sessions" and method == "GET":
@@ -540,19 +573,28 @@ class Application:
 					raise ConsoleError("请求校验失败，请刷新页面后重试")
 				customer = form.get("customer", "")
 				purpose = form.get("purpose", "").strip()
-				if not purpose or len(purpose) > 200 or any(ord(character) < 32 for character in purpose):
-					raise ConsoleError("请输入 1-200 个可见字符的支持用途")
+				if len(purpose) > 200 or any(ord(character) < 32 for character in purpose):
+					raise ConsoleError("支持用途最多为 200 个可见字符")
+				platform = form.get("platform", "linux")
+				if platform not in ("linux", "windows"):
+					raise ConsoleError("请选择 Linux 或 Windows Server")
+				platform_args = ("--platform", platform) if platform == "windows" else ()
 				created = json.loads(manager(
 					"create", customer,
 					"--created-by", str(session["login"]),
 					"--purpose", purpose,
+					*platform_args,
 				))
 				if not isinstance(created, dict) or not isinstance(created.get("token"), str):
 					raise ConsoleError("支持会话服务返回无效数据")
-				content = f"""<header><h1>支持会话已创建</h1><a href=\"/support/\">返回会话列表</a></header><section class=\"card\"><p>会话 ID：<code>{html.escape(str(created['id']))}</code>。以下内容仅显示一次，且不会被管理页面持久保存。</p>
-<div class=\"secret-section\"><div class=\"secret-heading\"><h2>客户执行命令</h2><button type=\"button\" class=\"copy-button\" data-copy-target=\"customer-command\">复制</button></div><div id=\"customer-command\" class=\"secret\">{html.escape(str(created['customer_command']))}</div></div>
-<div class=\"secret-section\"><div class=\"secret-heading\"><h2>一次性支持会话码</h2><button type=\"button\" class=\"copy-button\" data-copy-target=\"support-token\">复制</button></div><div id=\"support-token\" class=\"secret token\">{html.escape(created['token'])}</div></div>
-<p class=\"muted\">请将命令和会话码通过两个独立安全渠道发送给客户；会话码默认 15 分钟后失效。</p></section>"""
+				legacy_code = ""
+				if created.get("auth_mode") != "enrollment-key":
+					legacy_code = f'<div class="secret-section"><h2>一次性支持会话码</h2><button type="button" class="copy-button" data-copy-target="support-token">复制</button><div id="support-token" class="secret token">{html.escape(created["token"])}</div></div>'
+				instructions = ("请通过安全渠道发送客户命令；命令中的链接就是接入凭据，默认 15 分钟有效，无需另输会话码。"
+					if created.get("auth_mode") == "enrollment-key" else "请将命令和会话码通过两个独立安全渠道发送给客户。")
+				content = f"""<header><h1>支持会话已创建</h1><a href="/support/">返回会话列表</a></header><section class="card"><p>会话 ID：<code>{html.escape(str(created['id']))}</code>。以下内容仅显示一次，且不会被管理页面持久保存。</p>
+<div class="secret-section"><div class="secret-heading"><h2>客户执行命令（{"管理员 PowerShell" if platform == "windows" else "Linux 终端"}）</h2><button type="button" class="copy-button" data-copy-target="customer-command">复制</button></div><div id="customer-command" class="secret">{html.escape(str(created['customer_command']))}</div></div>
+{legacy_code}<p class="muted">{instructions}</p></section>"""
 				return self.response(start_response, HTTPStatus.OK, page("会话已创建", content))
 			if path.startswith("/session/") and path.endswith("/close") and method == "POST":
 				target = path.removeprefix("/session/").removesuffix("/close")

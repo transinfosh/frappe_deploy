@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import json
 import os
@@ -113,9 +114,9 @@ def validate_created_by(value: str) -> str:
 	return value
 
 
-def validate_purpose(value: str) -> str:
+def validate_purpose(value: str, *, allow_empty: bool = False) -> str:
 	value = value.strip()
-	if not value or len(value) > 200 or any(ord(character) < 32 for character in value):
+	if (not value and not allow_empty) or len(value) > 200 or any(ord(character) < 32 for character in value):
 		raise argparse.ArgumentTypeError("支持用途必须为 1-200 个可见字符")
 	return value
 
@@ -239,7 +240,11 @@ def close_remote(
 	return remote_action(settings, "close", session_id, input_text=request)
 
 
-def create_session(settings: Settings, customer: str, created_by: str, purpose: str) -> dict[str, Any]:
+def create_session(
+	settings: Settings, customer: str, created_by: str, purpose: str = "", platform: str = "linux",
+) -> dict[str, Any]:
+	if platform not in ("linux", "windows"):
+		raise RemoteActionError("客户操作系统无效")
 	sessions_dir = settings.state_dir / "sessions"
 	sessions_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 	with tempfile.TemporaryDirectory(prefix="tsuite-support-operator.") as temporary_dir:
@@ -252,6 +257,7 @@ def create_session(settings: Settings, customer: str, created_by: str, purpose: 
 		public_key = key_path.with_suffix(".pub").read_text(encoding="utf-8").strip()
 		request = json.dumps({
 			"customer": customer,
+			"platform": platform,
 			"operator_public_key": public_key,
 			"created_by": created_by,
 			"purpose": purpose,
@@ -264,6 +270,9 @@ def create_session(settings: Settings, customer: str, created_by: str, purpose: 
 		session_id = created.get("id") if isinstance(created, dict) else None
 		if not isinstance(session_id, str) or not SESSION_RE.fullmatch(session_id):
 			raise RemoteActionError("堡垒机返回了无效会话 ID")
+		if created.get("platform", "linux") != platform:
+			close_remote(settings, session_id, "system:broker", "force", "堡垒机未返回请求的操作系统")
+			raise RemoteActionError("堡垒机不支持请求的操作系统，请同步升级")
 		if not isinstance(created.get("token"), str) or not isinstance(created.get("customer_command"), str):
 			close_remote(settings, session_id, "system:broker", "force", "堡垒机返回的会话凭据无效")
 			raise RemoteActionError("堡垒机返回的会话凭据无效")
@@ -277,9 +286,11 @@ def create_session(settings: Settings, customer: str, created_by: str, purpose: 
 				json.dumps({
 					"id": session_id,
 					"customer": customer,
+					"platform": platform,
 					"created_by": created_by,
 					"purpose": purpose,
 					"expires_at": created["expires_at"],
+					"idle_timeout_seconds": created.get("idle_timeout_seconds"),
 					"identity_file": str(identity_path(settings, session_id)),
 				}, ensure_ascii=False, sort_keys=True) + "\n",
 			)
@@ -288,6 +299,34 @@ def create_session(settings: Settings, customer: str, created_by: str, purpose: 
 			remove_local_session(settings, session_id)
 			raise
 	return created
+
+
+def windows_command(command: list[str]) -> str:
+	"""Pass native Windows argv without cmd.exe or PowerShell string interpolation."""
+	quote = lambda value: "'" + value.replace("'", "''") + "'"
+	script = (
+		"$ErrorActionPreference = 'Stop'; $start = New-Object Diagnostics.ProcessStartInfo; "
+		f"$start.FileName = {quote(command[0])}; "
+		f"$start.Arguments = {quote(subprocess.list2cmdline(command[1:]))}; "
+		"$start.UseShellExecute = $false; $process = [Diagnostics.Process]::Start($start); "
+		"$process.WaitForExit(); exit $process.ExitCode"
+	)
+	return encoded_powershell(script)
+
+
+def encoded_powershell(script: str) -> str:
+	return "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + base64.b64encode(
+		script.encode("utf-16-le")
+	).decode()
+
+
+def windows_cleanup(session_id: str) -> str:
+	if not re.fullmatch(r"[a-f0-9]{12}", session_id):
+		raise ValueError("会话 ID 无效")
+	return encoded_powershell(
+		f"& (Join-Path $env:ProgramData 'TSuiteSupport/{session_id}/client.ps1') "
+		f"-Mode Close -SessionId '{session_id}'"
+	)
 
 
 def customer_ssh_args(
@@ -326,13 +365,28 @@ def customer_ssh_args(
 	]
 
 
+def connect_with_activity(arguments, base_arguments, remote, session_id, running_command, env=None):
+	import importlib.util
+	module_path = pathlib.Path(__file__).resolve().with_name("tsuite_support_activity.py")
+	if not module_path.is_file():
+		module_path = pathlib.Path(__file__).resolve().parents[1] / "operator" / "tsuite_support_activity.py"
+	spec = importlib.util.spec_from_file_location("tsuite_support_activity", module_path)
+	module = importlib.util.module_from_spec(spec)
+	spec.loader.exec_module(module)
+	return module.connect(arguments, base_arguments, remote.get("platform", "linux"), session_id,
+		running_command=running_command, env=env)
+
+
 def connect_customer(settings: Settings, session_id: str, command: list[str] | None = None) -> int:
 	remote = remote_session(settings, session_id)
 	with tempfile.TemporaryDirectory(prefix="tsuite-support-known-hosts.") as temporary_dir:
 		known_hosts = pathlib.Path(temporary_dir) / "known_hosts"
 		arguments = customer_ssh_args(settings, session_id, remote, known_hosts)
+		base_arguments = list(arguments)
 		if command:
-			arguments.append(shlex.join(command))
+			arguments.append(windows_command(command) if remote.get("platform") == "windows" else shlex.join(command))
+		if remote.get("idle_timeout_seconds"):
+			return connect_with_activity(arguments, base_arguments, remote, session_id, bool(command), customer_proxy_environment())
 		return subprocess.call(arguments, env=customer_proxy_environment())
 
 
@@ -356,7 +410,8 @@ def close_session(
 				known_hosts = pathlib.Path(temporary_dir) / "known_hosts"
 				arguments = customer_ssh_args(settings, session_id, remote, known_hosts)
 				cleanup = run(
-					[*arguments, "sudo -n /usr/local/sbin/tsuite-support-client close"],
+					[*arguments, windows_cleanup(session_id) if remote.get("platform") == "windows"
+					 else "sudo -n /usr/local/sbin/tsuite-support-client close"],
 					env=customer_proxy_environment(),
 				)
 				if cleanup.returncode != 0 or f"cleanup-scheduled:{session_id}" not in cleanup.stdout:
@@ -392,7 +447,7 @@ def garbage_collect(settings: Settings) -> None:
 		except RemoteActionError:
 			with contextlib.suppress(RemoteActionError, KeyError, TypeError, ValueError):
 				local = load_local_session(settings, session_id)
-				if int(local["expires_at"]) <= int(time.time()):
+				if not local.get("idle_timeout_seconds") and int(local["expires_at"]) <= int(time.time()):
 					remove_local_session(settings, session_id)
 			continue
 		if remote.get("status") in {"closed", "expired"}:
@@ -414,7 +469,8 @@ def parser() -> argparse.ArgumentParser:
 	create = subparsers.add_parser("create")
 	create.add_argument("customer", type=validate_customer)
 	create.add_argument("--created-by", required=True, type=validate_created_by)
-	create.add_argument("--purpose", required=True, type=validate_purpose)
+	create.add_argument("--purpose", default="", type=lambda value: validate_purpose(value, allow_empty=True))
+	create.add_argument("--platform", choices=("linux", "windows"), default="linux")
 	show = subparsers.add_parser("show")
 	show.add_argument("session_id", type=validate_session_id)
 	close = subparsers.add_parser("close")
@@ -439,7 +495,7 @@ def main() -> int:
 	args = parser().parse_args()
 	settings = Settings.load()
 	if args.action == "create":
-		created = create_session(settings, args.customer, args.created_by, args.purpose)
+		created = create_session(settings, args.customer, args.created_by, args.purpose, args.platform)
 		print(json.dumps(created, ensure_ascii=False, separators=(",", ":")))
 		return 0
 	if args.action == "list":

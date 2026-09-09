@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import pathlib
@@ -83,6 +84,34 @@ def load_session(session_id: str) -> dict[str, Any]:
 	return read_json(session_path(session_id))
 
 
+def windows_command(command: list[str]) -> str:
+	"""Pass native Windows argv without cmd.exe or PowerShell string interpolation."""
+	quote = lambda value: "'" + value.replace("'", "''") + "'"
+	script = (
+		"$ErrorActionPreference = 'Stop'; $start = New-Object Diagnostics.ProcessStartInfo; "
+		f"$start.FileName = {quote(command[0])}; "
+		f"$start.Arguments = {quote(subprocess.list2cmdline(command[1:]))}; "
+		"$start.UseShellExecute = $false; $process = [Diagnostics.Process]::Start($start); "
+		"$process.WaitForExit(); exit $process.ExitCode"
+	)
+	return encoded_powershell(script)
+
+
+def encoded_powershell(script: str) -> str:
+	return "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + base64.b64encode(
+		script.encode("utf-16-le")
+	).decode()
+
+
+def windows_cleanup(session_id: str) -> str:
+	if not re.fullmatch(r"[a-f0-9]{12}", session_id):
+		raise ValueError("会话 ID 无效")
+	return encoded_powershell(
+		f"& (Join-Path $env:ProgramData 'TSuiteSupport/{session_id}/client.ps1') "
+		f"-Mode Close -SessionId '{session_id}'"
+	)
+
+
 def customer_ssh_args(config: dict[str, Any], local: dict[str, Any], remote: dict[str, Any]) -> tuple[list[str], pathlib.Path]:
 	host_key = remote.get("customer_host_key")
 	if not host_key:
@@ -133,6 +162,7 @@ def create(args: argparse.Namespace) -> None:
 			"--operator-public-key", "-",
 			"--created-by", args.created_by,
 			"--purpose", args.purpose,
+			"--platform", args.platform,
 			"--json",
 			input_text=public_key,
 		)
@@ -140,12 +170,17 @@ def create(args: argparse.Namespace) -> None:
 		session_id = result["id"]
 		if not re.fullmatch(r"[a-f0-9]{12}", session_id) or not isinstance(result.get("token"), str):
 			raise CliError("堡垒机返回了无效的会话数据")
+		if result.get("platform", "linux") != args.platform:
+			remote_cli(config, "close", session_id, "--closed-by", args.created_by,
+				"--mode", "force", "--reason", "堡垒机未返回请求的操作系统")
+			raise CliError("堡垒机不支持请求的操作系统，请同步升级")
 		identity_path = SESSIONS_DIR / f"{session_id}.ed25519"
 		atomic_write(identity_path, key_path.read_text(encoding="utf-8"))
 		local = {"id": session_id, "customer": args.customer, "identity_file": str(identity_path)}
 		atomic_write(session_path(session_id), json.dumps(local, ensure_ascii=False, indent=2) + "\n")
 	print(result["customer_command"])
-	print(f"一次性会话码: {result['token']}", file=sys.stderr)
+	if result.get("auth_mode") != "enrollment-key":
+		print(f"一次性会话码: {result['token']}", file=sys.stderr)
 	print(f"会话 ID: {session_id}", file=sys.stderr)
 
 
@@ -157,17 +192,35 @@ def show_remote(config: dict[str, Any], session_id: str) -> dict[str, Any]:
 	return value
 
 
+def connect_with_activity(arguments, base_arguments, remote, session_id, running_command, env=None):
+	import importlib.util
+	module_path = pathlib.Path(__file__).resolve().with_name("tsuite_support_activity.py")
+	if not module_path.is_file():
+		module_path = pathlib.Path(__file__).resolve().parents[1] / "operator" / "tsuite_support_activity.py"
+	spec = importlib.util.spec_from_file_location("tsuite_support_activity", module_path)
+	module = importlib.util.module_from_spec(spec)
+	spec.loader.exec_module(module)
+	return module.connect(arguments, base_arguments, remote.get("platform", "linux"), session_id,
+		running_command=running_command, env=env)
+
+
 def connect(args: argparse.Namespace, command: list[str] | None = None) -> int:
 	config = read_json(CONFIG_PATH)
 	local = load_session(args.session_id)
 	remote = show_remote(config, args.session_id)
 	ssh_args, _ = customer_ssh_args(config, local, remote)
+	base_arguments = list(ssh_args)
 	if command:
 		if command[0] == "--":
 			command = command[1:]
 		if not command:
 			raise CliError("缺少远端命令")
-		ssh_args.append(shlex.join(command))
+		if remote.get("platform") == "windows":
+			ssh_args.append(windows_command(command))
+		else:
+			ssh_args.append(shlex.join(command))
+	if remote.get("idle_timeout_seconds"):
+		return connect_with_activity(ssh_args, base_arguments, remote, args.session_id, bool(command))
 	return subprocess.call(ssh_args)
 
 
@@ -185,6 +238,7 @@ def close(args: argparse.Namespace) -> None:
 			try:
 				ssh_args, _ = customer_ssh_args(config, local, remote)
 				cleanup = subprocess.run(
+					[*ssh_args, windows_cleanup(args.session_id)] if remote.get("platform") == "windows" else
 					[*ssh_args, "sudo", "-n", "/usr/local/sbin/tsuite-support-client", "close"],
 					check=False, capture_output=True, text=True,
 				)
@@ -256,7 +310,8 @@ def parser() -> argparse.ArgumentParser:
 	create_parser = subparsers.add_parser("create")
 	create_parser.add_argument("customer")
 	create_parser.add_argument("--created-by", default=os.environ.get("USER", "operator"))
-	create_parser.add_argument("--purpose", required=True)
+	create_parser.add_argument("--purpose", default="")
+	create_parser.add_argument("--platform", choices=("linux", "windows"), default="linux")
 	ssh_parser = subparsers.add_parser("ssh")
 	ssh_parser.add_argument("session_id")
 	run_parser = subparsers.add_parser("run")

@@ -117,7 +117,8 @@ def read_request() -> dict[str, object]:
 
 def read_create_request() -> dict[str, str]:
 	value = read_request()
-	fields = {key: value.get(key) for key in ("customer", "operator_public_key", "created_by", "purpose")}
+	fields = {key: value.get(key) for key in ("customer", "operator_public_key", "created_by")}
+	fields["purpose"] = value.get("purpose", "")
 	if not all(isinstance(item, str) for item in fields.values()):
 		raise ActionError("创建会话请求字段无效")
 	if not CUSTOMER_RE.fullmatch(fields["customer"]):
@@ -125,9 +126,13 @@ def read_create_request() -> dict[str, str]:
 	if not CREATED_BY_RE.fullmatch(fields["created_by"]):
 		raise ActionError("会话创建人格式无效")
 	purpose = fields["purpose"].strip()
-	if not purpose or len(purpose) > 200 or any(ord(character) < 32 for character in purpose):
-		raise ActionError("支持用途必须为 1-200 个可见字符")
+	if len(purpose) > 200 or any(ord(character) < 32 for character in purpose):
+		raise ActionError("支持用途最多为 200 个可见字符")
 	fields["purpose"] = purpose
+	platform = value.get("platform", "linux")
+	if platform not in ("linux", "windows"):
+		raise ActionError("客户操作系统无效")
+	fields["platform"] = platform
 	return fields
 
 
@@ -177,6 +182,7 @@ def main(arguments: list[str] | None = None) -> int:
 			"--operator-public-key", "-",
 			"--created-by", request["created_by"],
 			"--purpose", request["purpose"],
+			"--platform", request["platform"],
 			"--json",
 			input_text=request["operator_public_key"],
 		)

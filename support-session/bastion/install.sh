@@ -36,8 +36,8 @@ usage() {
 可选：
   --bastion-port PORT          堡垒机 SSH 端口，默认 22
   --port-range START-END       反向 SSH 回环端口范围，默认 22000-22999
-  --token-ttl SECONDS          一次性会话码有效期，默认 900
-  --session-ttl SECONDS        支持会话有效期，默认 7200
+  --token-ttl SECONDS          接入链接有效期，默认 900
+  --session-ttl SECONDS        会话闲置超时，默认 7200
 EOF
 }
 
@@ -76,6 +76,9 @@ require_integer "会话码有效期" "$TOKEN_TTL_SECONDS" 60 3600
 require_integer "会话有效期" "$SESSION_TTL_SECONDS" 300 28800
 [[ -f "$SCRIPT_DIR/tsuite_support_session.py" ]] || die "缺少 tsuite_support_session.py"
 [[ -f "$BOOTSTRAP_SOURCE" ]] || die "缺少客户 bootstrap.sh"
+for windows_script in bootstrap.ps1 windows-client.ps1; do
+	[[ -f "$SCRIPT_DIR/../customer/$windows_script" ]] || die "缺少客户 $windows_script"
+done
 for command_name in caddy getent groupadd id install passwd python3 ssh sshd ssh-keygen systemctl useradd usermod visudo; do
 	command -v "$command_name" >/dev/null 2>&1 || die "缺少命令: $command_name"
 done
@@ -104,6 +107,8 @@ install -d -m 2750 -o root -g caddy "$DOWNLOADS_DIR"
 install -d -m 0711 -o root -g root "$AUTHORIZED_KEYS_DIR"
 install -m 0755 "$SCRIPT_DIR/tsuite_support_session.py" "$INSTALL_ROOT/tsuite-support-session"
 install -m 0755 "$BOOTSTRAP_SOURCE" "$INSTALL_ROOT/bootstrap.sh"
+install -m 0644 "$SCRIPT_DIR/../customer/linux-client.py" "$INSTALL_ROOT/linux-client.py"
+install -m 0644 "$SCRIPT_DIR/../customer/bootstrap.ps1" "$SCRIPT_DIR/../customer/windows-client.ps1" "$INSTALL_ROOT/"
 ln -sfn "$INSTALL_ROOT/tsuite-support-session" /usr/local/sbin/tsuite-support-session
 install -m 0660 -o "$ENROLL_USER" -g "$ENROLL_USER" /dev/null "$STATE_DIR/.lock"
 if [[ ! -f "$AUTHORIZED_KEYS_DIR/$ENROLL_USER" ]]; then
@@ -210,6 +215,8 @@ rm -f "$caddyfile_backup"
 fi
 
 cat >/etc/sudoers.d/tsuite-support-session <<EOF
+Defaults:$ENROLL_USER env_keep += "SSH_ORIGINAL_COMMAND"
+$ENROLL_USER ALL=(root) NOPASSWD: /usr/local/sbin/tsuite-support-session --config $CONFIG_DIR/config.json enroll-ssh *, /usr/local/sbin/tsuite-support-session --config $CONFIG_DIR/config.json lease-ssh *
 $OPERATOR_USER ALL=(root) NOPASSWD: /usr/local/sbin/tsuite-support-session --config $CONFIG_DIR/config.json create *
 $OPERATOR_USER ALL=(root) NOPASSWD: /usr/local/sbin/tsuite-support-session --config $CONFIG_DIR/config.json show *
 $OPERATOR_USER ALL=(root) NOPASSWD: /usr/local/sbin/tsuite-support-session --config $CONFIG_DIR/config.json list

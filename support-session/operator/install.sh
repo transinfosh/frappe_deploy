@@ -8,4 +8,5 @@ INSTALL_PATH="${TSUITE_SUPPORT_INSTALL_PATH:-/usr/local/bin/tsuite-support}"
 [[ -f "$SCRIPT_DIR/tsuite-support" ]] || { printf '缺少 tsuite-support\n' >&2; exit 1; }
 python3 -m py_compile "$SCRIPT_DIR/tsuite-support"
 install -D -m 0755 "$SCRIPT_DIR/tsuite-support" "$INSTALL_PATH"
+install -m 0644 "$SCRIPT_DIR/tsuite_support_activity.py" "$(dirname "$INSTALL_PATH")/tsuite_support_activity.py"
 printf '安装完成: %s\n' "$INSTALL_PATH"

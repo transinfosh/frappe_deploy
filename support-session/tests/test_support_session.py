@@ -96,6 +96,8 @@ class SupportSessionTest(unittest.TestCase):
 	def test_audit_fields_are_validated(self):
 		self.assertEqual(SUPPORT.validate_created_by("alice-ops"), "alice-ops")
 		self.assertEqual(SUPPORT.validate_purpose(" 升级 SRM "), "升级 SRM")
+		self.assertEqual(SUPPORT.validate_purpose("  ", allow_empty=True), "")
+		self.assertEqual(SUPPORT.build_parser().parse_args(["create", "--customer", "one", "--operator-public-key", "-", "--created-by", "alice"]).purpose, "")
 		with self.assertRaises(SUPPORT.SupportError):
 			SUPPORT.validate_created_by("alice;root")
 		with self.assertRaises(SUPPORT.SupportError):
@@ -203,7 +205,8 @@ class StaticSecurityTest(unittest.TestCase):
 		self.assertIn('read -r -s -p "请输入一次性支持会话码', bootstrap)
 		self.assertIn('printf \'%s\' "$TOKEN" >"$work_dir/token"', bootstrap)
 		self.assertNotIn("Environment=TSUITE_SUPPORT_TOKEN", bootstrap)
-		self.assertIn("OnCalendar=@$expires_at", bootstrap)
+		self.assertIn("OnUnitActiveSec=15s", bootstrap)
+		self.assertIn("cleanup-if-expired", bootstrap)
 		self.assertIn('"${enrollment_ssh[@]}" reconcile', bootstrap)
 		self.assertIn('/usr/local/sbin/tsuite-support-client cleanup', bootstrap)
 		self.assertNotIn('本机已有支持会话，请先关闭后再创建新会话', bootstrap)
