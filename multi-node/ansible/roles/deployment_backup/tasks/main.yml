@@ -62,6 +62,7 @@
       - --tuples-only
       - --no-align
       - "--set=target_database={{ deployment_backup_database_name }}"
+      - --set=ON_ERROR_STOP=1
     stdin: "SELECT 1 FROM pg_database WHERE datname = :'target_database';"
   environment:
     PGPASSWORD: "{{ deployment_backup_database_admin_password }}"
