@@ -66,8 +66,8 @@
           NO_PROXY: "{{ deployment_no_proxy | replace('\n', '') | replace(' ', '') }}"
           no_proxy: "{{ deployment_no_proxy | replace('\n', '') | replace(' ', '') }}"
         python_container_migrate_command: >-
-          /app/.venv/bin/python -m tai_service.migrate
-          --database-url postgresql://postgres:{{ vault_runtime_db_admin_password | urlencode }}@{{ external_database_host if (external_database_enabled | default(false) | bool) else 'tai-runtime-postgres' }}:{{ external_database_port if (external_database_enabled | default(false) | bool) else 5432 }}/{{ runtime_database_name }}
+          /app/.venv/bin/python -c "import os; from pathlib import Path; from tai_service.migrate import migrate; applied = migrate(os.environ['TAI_RUNTIME_MIGRATION_DATABASE_URL'], Path('/app/migrations')); print('Applied Runtime DB migrations:', ', '.join(map(str, applied)) or 'none')"
+        python_container_migrate_environment: "{{ python_container_pre_migrate_environment }}"
         python_container_pre_migrate_command: >-
           /app/.venv/bin/python -m tai_service.durable_cutover --expire-overdue
         python_container_pre_migrate_environment:

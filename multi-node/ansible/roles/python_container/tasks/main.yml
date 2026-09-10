@@ -117,7 +117,8 @@
   ansible.builtin.command: >-
     docker compose --env-file {{ python_container_root }}/.env
     -p tai-{{ python_container_name }} -f {{ python_container_root }}/compose.yml
-    run --rm service {{ python_container_migrate_command }}
+    run --rm {% for name in python_container_migrate_environment %}-e {{ name | quote }} {% endfor %}service {{ python_container_migrate_command }}
+  environment: "{{ python_container_migrate_environment }}"
   when: python_container_migrate_command | length > 0
   no_log: true
   changed_when: false

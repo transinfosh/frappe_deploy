@@ -15,6 +15,7 @@ python_container_worker_command: ""
 python_container_pre_migrate_command: ""
 python_container_pre_migrate_environment: {}
 python_container_migrate_command: ""
+python_container_migrate_environment: {}
 python_container_python_image: python:3.11-slim-bookworm
 python_container_apt_mirror: ""
 python_container_install_mssql_driver: false
