@@ -281,7 +281,9 @@ control_settings_script = (
     pathlib.Path(sys.argv[1])
     / "roles/tai_control_config/templates/configure_settings.py.j2"
 ).read_text(encoding="utf-8")
-assert '"issuer": "https://{{ control_site_name }}"' in control_settings_script
+assert '"issuer"' not in control_settings_script
+assert '"audience"' not in control_settings_script
+assert '"embedding_enabled"' not in control_settings_script
 assert '"agent_runtime_url": "https://{{ runtime_public_hostname }}"' in control_settings_script
 assert "frappe.db.set_single_value" in control_settings_script
 assert '"chat_provider_key"' not in control_settings_script

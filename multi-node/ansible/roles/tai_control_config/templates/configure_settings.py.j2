@@ -4,17 +4,9 @@ import frappe
 
 
 changed = False
+# Deployment owns connectivity only. Model choices stay under Control management.
 expected = {
-    "issuer": "https://{{ control_site_name }}",
-    "audience": "tai-service",
     "agent_runtime_url": "https://{{ runtime_public_hostname }}",
-    "embedding_enabled": 1,
-    "embedding_provider_key": {{ embedding_provider_key | to_json }},
-    "embedding_model_key": {{ embedding_model | to_json }},
-    "embedding_dimensions": {{ embedding_dimensions }},
-    "embedding_timeout_seconds": {{ embedding_timeout_seconds }},
-    "embedding_backfill_batch_size": {{ embedding_backfill_batch_size }},
-    "embedding_similarity_threshold": 0.3,
 }
 for fieldname, value in expected.items():
     if frappe.db.get_single_value("TAI Control Settings", fieldname) != value:
@@ -29,8 +21,6 @@ print(
     + json.dumps(
         {
             "changed": changed,
-            "issuer": expected["issuer"],
-            "audience": expected["audience"],
             "agent_runtime_url": expected["agent_runtime_url"],
         },
         sort_keys=True,

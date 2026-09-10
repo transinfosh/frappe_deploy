@@ -81,7 +81,7 @@
       - frappe-control-backend-1:/tmp/configure-control-plane-settings.py
   changed_when: false
 
-- name: 同步控制面公开 Issuer 与 Runtime 地址
+- name: 同步控制面 Runtime 地址
   ansible.builtin.command:
     argv:
       - docker

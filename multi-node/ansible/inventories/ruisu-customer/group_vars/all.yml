@@ -8,14 +8,14 @@ deployment_registry: ghcr.io
 deployment_registry_username: "{{ vault_ghcr_username | default('') }}"
 deployment_registry_token: "{{ vault_ghcr_token | default('') }}"
 deployment_image_tag: v0.1.0-internal-demo.2
-customer_image_tag: 0.0.21.post1
-customer_source_commit: 0f4b40e268496a25d7bf2cb83aefa984a7e806c8
-customer_frappe_image: "ghcr.io/transinfosh/tai-customer@sha256:368768c7d0220de7ad481f15ed99fc4f741bc3945d7ebe570ab12ac6529eea92"
-control_frappe_image: "ghcr.io/transinfosh/tai-control:{{ deployment_image_tag }}"
-tai_service_image: "ghcr.io/transinfosh/tai-service:{{ deployment_image_tag }}"
-tbi_engine_release_version: 0.1.5
-tbi_engine_source_commit: a99648b2dcc4baa7d25173f59837d776a96dbdd8
-tbi_engine_image: "ghcr.io/transinfosh/tbi-engine@sha256:728ee0f3ec4518030a7e29c08990463a3da6a47408cc86598c99f945772ea3ad"
+customer_image_tag: 0.0.31
+customer_source_commit: 0904e47a4a95eb0e0a7679b41b34e49789f3a4db
+customer_frappe_image: "ghcr.io/transinfosh/tai-customer@sha256:04b480468bff1ce47543f3dc0e1a7681f62ee9c8ea0e33085c381eb82030357b"
+control_frappe_image: "ghcr.io/transinfosh/tai-control@sha256:fad42b7418c8f062d94101dcda7852e50ee8f2458fa251a95fc54f97ae6f036e"
+tai_service_image: "ghcr.io/transinfosh/tai-service@sha256:956284425283df604f21eed13d48863615bd5c24d6d21852a3ff5c65c06db088"
+tbi_engine_release_version: 0.1.11
+tbi_engine_source_commit: d368301c28742e78e91f5d337345f8052d86539f
+tbi_engine_image: "ghcr.io/transinfosh/tbi-engine@sha256:f6515581bfb44d90e72ab1a2e299be1d3c42adb34945ae82cd8cacff36dbb9e9"
 tai_auth_image: "ghcr.io/transinfosh/tai-auth:{{ deployment_image_tag }}"
 frappe_docker_repo: https://github.com/transinfosh/frappe_docker.git
 frappe_docker_ref: main
